@@ -165,38 +165,44 @@ def insert_sql(connection, cursor, table, unique_column, new_records):
     new_records = new_records.reset_index(
         drop=False)  # Ensure 'npsn' is a column
 
-    for start in range(0, len(new_records), 1000):  # Batch insert
-        batch_df = new_records.iloc[start:start+1000]
+    # for start in range(0, len(new_records), 1000):  # Batch insert
+    #     batch_df = new_records.iloc[start:start+1000]
 
-        # Remove rows with empty 'npsn'
-        batch_df = batch_df[batch_df[unique_column].notna() & (
-            batch_df[unique_column] != '')]
+    #     # Remove rows with empty 'npsn'
+    #     batch_df = batch_df[batch_df[unique_column].notna() & (
+    #         batch_df[unique_column] != '')]
 
-        if batch_df.empty:
-            print("Skipping empty batch...")
-            continue
+    #     if batch_df.empty:
+    #         empty_new_records = new_records[new_records[unique_column].isna() | new_records[unique_column].eq('')]
 
-        columns = ', '.join(batch_df.columns)
-        placeholders = ', '.join(['%s'] * len(batch_df.columns))
+    #         print(f"Skipping {empty_new_records} records with empty NPSN")
+    #         continue
+    # Remove rows with empty 'npsn'
+    new_records = new_records[new_records[unique_column].notna() & (
+        new_records[unique_column] != '')]
 
-        # Use `ON DUPLICATE KEY UPDATE` to handle duplicate entries efficiently
-        insert_sql = f"""
-            INSERT INTO {table} ({columns})
-            VALUES ({placeholders})
-            ON DUPLICATE KEY UPDATE 
-            {', '.join([f"{col} = VALUES({col})" for col in batch_df.columns if col != unique_column])}
-        """
+    # Count & print skipped records
+    empty_new_records = new_records[new_records[
+        unique_column].isna(
+    ) | new_records[unique_column].eq('')]
+    print(
+        f"Skipping insert for {len(empty_new_records)} records with empty NPSN")
+    columns = ', '.join(new_records.columns)
+    placeholders = ', '.join(['%s'] * len(new_records.columns))
 
-        values = [tuple(row) for row in batch_df.to_numpy()]
+    # Use `ON DUPLICATE KEY UPDATE` to handle duplicate entries efficiently
+    insert_sql = f""" INSERT INTO {table} ({columns}) VALUES ({placeholders}) ON DUPLICATE KEY UPDATE  {', '.join([f"{col} = VALUES({col})" for col in new_records.columns if col != unique_column])}"""
 
-        try:
-            cursor.executemany(insert_sql, values)
-            connection.commit()
-            print(f"Inserted/Updated {len(batch_df)} records successfully!")
-        except IntegrityError as e:
-            print(f"IntegrityError: Skipping duplicate entries - {e}")
-        except pymysql.MySQLError as e:
-            print(f"MySQL Error during insert: {e}")
+    values = [tuple(row) for row in new_records.to_numpy()]
+
+    try:
+        cursor.executemany(insert_sql, values)
+        connection.commit()
+        print(f"Inserted/Updated {len(new_records)} records successfully!")
+    except IntegrityError as e:
+        print(f"IntegrityError: Skipping duplicate entries - {e}")
+    except pymysql.MySQLError as e:
+        print(f"MySQL Error during insert: {e}")
 
 
 
@@ -205,16 +211,12 @@ def update_sql(connection, cursor, table, unique_column, updated_records):
     if updated_records.empty:
         print("No records to update.")
         return
-
     updated_records = updated_records.reset_index(
         drop=False)  # Ensure 'npsn' stays a column
 
     for _, row in updated_records.iterrows():
-        update_sql = f"""
-            UPDATE {table} 
-            SET {', '.join([f"{col} = %s" for col in updated_records.columns if col != unique_column])}
-            WHERE {unique_column} = %s
-        """
+        update_sql = f"""UPDATE {table} SET {', '.join([f"{col} = %s" for col in updated_records.columns if col != unique_column])} WHERE {
+            unique_column} = %s """
         try:
             cursor.execute(update_sql, list(
                 row.drop(unique_column, errors='ignore')) + [row[unique_column]])
@@ -225,13 +227,17 @@ def update_sql(connection, cursor, table, unique_column, updated_records):
     print(f"Updated {len(updated_records)} records successfully!")
 
 
-def compare_df(selected_columns, unique_column, existing_df):
-    # Set index to unique_column
+def comparing_df(selected_columns, unique_column, existing_df):
     scrapped_df = selected_columns.set_index(unique_column)
     existing_df = existing_df.set_index(unique_column)
 
-    # Ensure both DataFrames contain the same columns for accurate comparison
-    matching_columns = scrapped_df.columns.intersection(existing_df.columns)
+    # Drop rows where unique_column is missing
+    # scrapped_df = scrapped_df.dropna(subset=[unique_column])
+    # existing_df = existing_df.dropna(subset=[unique_column])
+
+    # Ensure both DataFrames contain the same columns for comparison
+    matching_columns = scrapped_df.columns.intersection(
+        existing_df.columns)
     scrapped_df = scrapped_df[matching_columns]
     existing_df = existing_df[matching_columns]
 
@@ -243,12 +249,26 @@ def compare_df(selected_columns, unique_column, existing_df):
     scrapped_df = scrapped_df.sort_index()
     matching_existing_df = matching_existing_df.sort_index()
 
-    # Filter rows where **any column value has changed**
-    updated_records = scrapped_df[scrapped_df.ne(
-        matching_existing_df).any(axis=1)]
+    # 🔹 FIX: Fill missing values to prevent TypeErrors
+    scrapped_df = scrapped_df.fillna("")
+    matching_existing_df = matching_existing_df.fillna("")
 
-    # Identify new rows that do not exist in existing_df
-    new_records = scrapped_df.loc[~scrapped_df.index.isin(existing_df.index)]
+    # 🔹 FIX: Convert all columns to string type before comparing
+    scrapped_df = scrapped_df.astype(str)
+    matching_existing_df = matching_existing_df.astype(str)
+
+    # Filter rows where **any column value has changed**
+    # Ensure existing_df is not empty and has at least 1 row
+    if not existing_df.empty and len(existing_df) > 1:
+        updated_records = scrapped_df[scrapped_df.ne(
+            matching_existing_df).any(axis=1)]
+    else:
+        # If existing_df has 0 or 1 row, just return scrapped_df as updates
+        updated_records = scrapped_df
+
+        # Identify new rows that do not exist in existing_df
+    new_records = scrapped_df.loc[~scrapped_df.index.isin(
+        existing_df.index)]
 
     return updated_records, new_records
 
@@ -270,26 +290,32 @@ if session:
         # existing_df = pd.read_sql(f"SELECT * FROM {table}", connection)
         columns = [unique_column, "nama_lembaga", "jenjang", "kabkota", "no_hp", "peringkat_akreditasi", "thn_akreditasi",
                    "surat_permohonan", "sertifikat", "status_permohonan", "status_sertifikat", "approve"]
+
         sql_data = cursor.execute(f"SELECT * FROM {table}")
         existing = cursor.fetchall()
         existing_df = pd.DataFrame(existing, columns=columns)
-        selected_columns.to_csv("scrapped.csv")
-        existing_df.to_csv("existing.csv")
+        # selected_columns.to_csv("scrapped.csv")
+        # existing_df.to_csv("existing.csv")
 
-        updated_records, new_records = compare_df(
+        updated_records, new_records = comparing_df(
             selected_columns, unique_column, existing_df)
 
+        updated_records.loc[:, ["status_permohonan",
+                                "status_sertifikat", "approve"]] = 0
+        print(
+            """success update DF for column ("status_permohonan", "status_sertifikat", "approve") """)
+        new_records.loc[:, ["status_permohonan",
+                            "status_sertifikat", "approve"]] = 0
+        print(
+            """success insert DF for column ("status_permohonan", "status_sertifikat", "approve") """)
         print("Update DF shape:", updated_records.shape)
         print("Insert DF shape:", new_records.shape)
-        for col in ["status_permohonan", "status_sertifikat", "approve"]:
-            new_records[col] = 0
-            updated_records[col] = 0
-        print(
-            """success update DF ("status_permohonan", "status_sertifikat", "approve") """)
         if not updated_records.empty:
+
             # Ensure 'npsn' is back as a column
             update_sql(connection, cursor, table,
                        unique_column, updated_records)
 
         if not new_records.empty:
+
             insert_sql(connection, cursor, table, unique_column, new_records)
