@@ -9,7 +9,7 @@ from pymysql.err import IntegrityError
 
 load_dotenv()
 ssh_host = os.getenv("SSH_HOST")
-ssh_port = int(os.getenv("SSH_PORT"))
+ssh_port = os.getenv("SSH_PORT")
 ssh_user = os.getenv("SSH_USER")
 ssh_password = os.getenv("SSH_PASSWORD")
 
@@ -58,6 +58,24 @@ def extract_href(html_text):
     match = re.search(r'<a href="([^"]+)"', html_text)
     return match.group(1) if match else None
 
+
+def extract_phone_number(text):
+    if not isinstance(text, str):  # Ensure input is a valid string
+        return None
+
+    match = re.search(
+        r'\b(?:\+62|62|0)?(?:\d{2,4}[-.\s]?)?\d{3,4}[-.\s]?\d{3,4}\b', text)
+
+    if match:
+        phone_number = match.group(0)
+        formatted_number = re.sub(
+            r'^\+?62', '0', phone_number)  # Convert +62/62 to 0
+        return formatted_number
+
+    return None
+
+
+
 # Function to process API response into a DataFrame
 
 
@@ -78,7 +96,7 @@ def process_pengajuan_response(data):
 
 
 # Running the process
-def pengrapian_data(extract_id, extract_href, data):
+def pengrapian_data(extract_id, extract_href, extract_phone_number, data):
     df = pd.DataFrame(data["data"])  # Convert JSON list to DataFrame
     #     # Define the column indexes you want to clean
     columns_to_clean = [2]
@@ -90,8 +108,14 @@ def pengrapian_data(extract_id, extract_href, data):
     # Apply the URL extraction function only to columns 12 and 13
     df.iloc[:, columns_to_extract_href] = df.iloc[:,
                                                   columns_to_extract_href].applymap(extract_href)
+    phone_columns = [8]
+    df.iloc[:, phone_columns] = df.iloc[:,
+                                        phone_columns].applymap(extract_phone_number)
+
     column_names = {2: "npsn",
                     3: "nama_lembaga",
+                    4: "jenjang",
+                    6: "kabkota",
                     8: "no_hp",
                     9: "peringkat_akreditasi",
                     10: "thn_akreditasi",
@@ -108,21 +132,21 @@ def pengrapian_data(extract_id, extract_href, data):
 session = helper()
 
 
-def connection_sql(ssh_host, ssh_port, ssh_user, ssh_password, db_host, db_user, db_password, db_name):
+def connection_sql():
     connection = None
     try:
         # Establish SSH tunnel
-        tunnel = SSHTunnelForwarder(
-            (ssh_host, ssh_port),
-            ssh_username=ssh_user,
-            ssh_password=ssh_password,
-            remote_bind_address=(db_host, 3306)
-        )
-        tunnel.start()
+        # tunnel = SSHTunnelForwarder(
+        #     (ssh_host, ssh_port),
+        #     ssh_username=ssh_user,
+        #     ssh_password=ssh_password,
+        #     remote_bind_address=(db_host, 3306)
+        # )
+        # tunnel.start()
 
         connection = pymysql.connect(
-            host="127.0.0.1", port=tunnel.local_bind_port,
-            user=db_user, password=db_password, database=db_name,
+            host="127.0.0.1", port=3306,
+            user="root", password="", database="bansmjatim",
             cursorclass=pymysql.cursors.DictCursor
         )
 
@@ -132,38 +156,6 @@ def connection_sql(ssh_host, ssh_port, ssh_user, ssh_password, db_host, db_user,
         return None
 
     return connection
-
-
-# def insert_sql(connection, cursor, table, unique_column, new_records):
-#     new_records = new_records.reset_index()  # Ensure 'npsn' is a column
-
-#     for start in range(0, len(new_records), 1000):  # Batch insert
-#         batch_df = new_records.iloc[start:start+1000]
-
-#         # Drop rows with empty 'npsn'
-#         batch_df = batch_df[batch_df[unique_column].notna() & (
-#             batch_df[unique_column] != '')]
-
-#         if batch_df.empty:
-#             print("Skipping empty batch...")
-#             continue
-
-#         columns = ', '.join(batch_df.columns)
-#         placeholders = ', '.join(['%s'] * len(batch_df.columns))
-#         insert_sql = f"""
-#                     INSERT INTO {table} ({columns})
-#                     VALUES ({placeholders})
-#                 """
-
-#         values = [tuple(row) for row in batch_df.to_numpy()]
-
-#         try:
-#             cursor.executemany(insert_sql, values)
-#             connection.commit()
-#             print(f"Inserted {len(batch_df)} rows...")
-#         except IntegrityError as e:
-#             print(f"IntegrityError: Skipping duplicate entries - {e}")
-
 
 def insert_sql(connection, cursor, table, unique_column, new_records):
     if new_records.empty:
@@ -206,20 +198,7 @@ def insert_sql(connection, cursor, table, unique_column, new_records):
         except pymysql.MySQLError as e:
             print(f"MySQL Error during insert: {e}")
 
-# def update_sql(connection, cursor, table, unique_column, updated_records):
-#     updated_records = updated_records.reset_index()
 
-#     for _, row in updated_records.iterrows():
-#         update_sql = f"""
-#                     UPDATE {table}
-#                     SET {', '.join([f"{col} = %s" for col in updated_records.columns if col != unique_column])}
-#                     WHERE {unique_column} = %s
-#                 """
-#         cursor.execute(update_sql, list(
-#             row.drop(unique_column)) + [row[unique_column]])
-
-#     connection.commit()
-#     print(f"Updated {len(updated_records)} records successfully!")
 
 
 def update_sql(connection, cursor, table, unique_column, updated_records):
@@ -246,21 +225,6 @@ def update_sql(connection, cursor, table, unique_column, updated_records):
     print(f"Updated {len(updated_records)} records successfully!")
 
 
-# def compare_df(selected_columns, unique_column, existing_df):
-#     scrapped_df = selected_columns.set_index(unique_column)
-#     existing_df = existing_df.set_index(unique_column)
-#     matching_existing_df = existing_df.loc[existing_df.index.intersection(
-#         scrapped_df.index)]
-#     scrapped_df = scrapped_df.sort_index()
-#     matching_existing_df = matching_existing_df.sort_index()
-
-#     updated_records = scrapped_df[
-#         scrapped_df.ne(matching_existing_df).any(
-#             axis=1)  # Detects column changes
-#     ]
-
-#     new_records = scrapped_df[~scrapped_df.index.isin(existing_df.index)]
-#     return updated_records, new_records
 def compare_df(selected_columns, unique_column, existing_df):
     # Set index to unique_column
     scrapped_df = selected_columns.set_index(unique_column)
@@ -293,10 +257,9 @@ if session:
     data = get_pengajuan(session)  # Print the raw data for debugging
     if "data" in data:
         column_names, selected_columns = pengrapian_data(
-            extract_id, extract_href, data)
+            extract_id, extract_href, extract_phone_number, data)
 
-        connection = connection_sql(ssh_host, ssh_port, ssh_user, ssh_password,
-                                    db_host, db_user, db_password, db_name)
+        connection = connection_sql()
         cursor = connection.cursor()
         # df.to_csv("pengajuan.csv")
         table = "tb_verifikasi_perpanjangan_paud"
@@ -305,7 +268,7 @@ if session:
 
         # Fetch existing data
         # existing_df = pd.read_sql(f"SELECT * FROM {table}", connection)
-        columns = [unique_column, "nama_lembaga", "no_hp", "peringkat_akreditasi", "thn_akreditasi",
+        columns = [unique_column, "nama_lembaga", "jenjang", "kabkota", "no_hp", "peringkat_akreditasi", "thn_akreditasi",
                    "surat_permohonan", "sertifikat", "status_permohonan", "status_sertifikat", "approve"]
         sql_data = cursor.execute(f"SELECT * FROM {table}")
         existing = cursor.fetchall()
